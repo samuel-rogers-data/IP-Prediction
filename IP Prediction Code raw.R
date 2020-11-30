@@ -1,0 +1,536 @@
+---
+  title: "Sam_Rogers_IP_Final_Project"
+author: "Sam Rogers"
+output:
+  html_document: default
+pdf_document: default
+---
+  
+
+
+
+
+
+# Install Packages
+
+library(RODBC)
+library(tidyverse)
+library(philentropy)
+library(factoextra)
+library(RWeka)
+library(partykit)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(e1071)
+library(arules)
+library(dplyr)
+library(randomForest)
+library(stringr)
+library(ggplot2)
+library(class)
+library(png)
+library(knitr)
+library(plyr)
+library(gbm)
+
+
+# Load Data 
+#In loading my data I had a lot of trouble loading from Azure SQL Server, local SQL and online csv downloads. In the end, the simplest solution was a simply copy paste or an export data from SQL source. While this isn't the best method, I hope to solve the SQL problem when I expand my dataset to the entire state of Oklahoma and not just a singular county. 
+
+
+Grady_Prod_Head <- read_csv("3_Grady_Prod_Headers.csv")
+
+Grady_Compl_Head <- read_csv("Completion_Oseberg_Pull.csv")
+
+Grady_Chem_Head <- read_csv("FracFocusCombo.csv")
+
+Results <- read.csv("Prediction_Results.csv")
+
+Data_Terms <- read.csv("Terms.csv")
+
+
+
+### Rename Data
+
+#Rename some dataset columns
+colnames(Grady_Chem_Head) <-c("pKey1", "APINumber", "OperatorName", "WellName", "Latitude", "Longitude", 	"Projection", "TVD", "TotalBaseWaterVolume", "TotalBaseNonWaterVolume", "StateName", 	"CountyName")
+
+
+colnames(Grady_Prod_Head)[1] <-("API")
+colnames(Grady_Prod_Head)[6] <-("WellName")
+
+
+
+
+
+
+#Filter early to reduce vast dataset size to Grady County for FracFocus dataset aka Grady_Chem_Head
+
+Grady_Chem_Head <- Grady_Chem_Head %>% filter (CountyName == 'Grady')  # now 40670 observations
+
+
+#Create funtion to eliminate to the right 
+left = function(text, num_char) {
+substr(text, 1, num_char)
+}
+
+#Create funtion to eliminate to the left 
+right = function(text, num_char) {
+substr(text, nchar(text) - (num_char-1), nchar(text))
+}
+
+
+
+
+#Grady_Chem_Head$`APINumber` <- left(Grady_Chem_Head$`APINumber`,10)
+#Grady_Prod_Head$API <- left(Grady_Prod_Head$API,10)
+Grady_Compl_Head$ApiNumber <- right(Grady_Compl_Head$ApiNumber,7)
+Grady_Chem_Head$APINumber <- right(Grady_Chem_Head$APINumber,7)
+
+# Convert to Numeric from Character
+Grady_Chem_Head <- Grady_Chem_Head %>% mutate(APINumber = as.character(as.numeric(APINumber)))
+Grady_Prod_Head <- Grady_Prod_Head %>% mutate(API = as.character(as.numeric(API)))
+Grady_Compl_Head <- Grady_Compl_Head %>% 
+mutate(BHTotalLength= as.numeric(BHTotalLength))  %>%
+mutate (ApiNumber = as.character(as.numeric(ApiNumber))) 
+
+
+
+
+## Combine Datasets 
+
+
+# Select individually important fields from datasets
+OS_Comp_Full <- Grady_Compl_Head %>% select (c("ApiNumber", "FractureTreatment", "PumpingFlowing", "ChokeSize", "Legal", "BHTotalLength", "Formations")) 
+
+DI_Prod_Full <- Grady_Prod_Head %>% select (c("API", "Operator Company Name", "WellName", "Well Number","Reservoir", "Producing Status", "Drill Type","Production Type", "Spud Date", "First Month Oil","First Month Gas", "First 60 Oil", "First 60 Gas", "First 60 BOE", "Measured Depth (TD)", "Gross Perforated Interval")) %>% unite("Well Name", 'WellName':'Well Number', sep =" ", na.rm=TRUE, remove=FALSE) %>% select (-c('WellName','Well Number')) 
+
+FF_Chem_Full <- Grady_Chem_Head %>% select (c("APINumber","TVD","TotalBaseWaterVolume"))
+
+OS_Comp_Full <- OS_Comp_Full[!duplicated(OS_Comp_Full$ApiNumber), ]
+DI_Prod_Full <- DI_Prod_Full[!duplicated(DI_Prod_Full$API), ]
+FF_Chem_Full <- FF_Chem_Full[!duplicated(FF_Chem_Full$APINumber), ]  #determine if can give preference to Purpose = "Proppant" but still include if proppant not listed ***
+
+#left_join, smallest to largest combination
+Grady <- left_join(DI_Prod_Full, OS_Comp_Full, by = c("API" = "ApiNumber"), copy=FALSE) #formations / reservoirs are long, how should I select a specific one? Perhaps make new records for each reservoir? Perhaps delete multi reservoirs
+Grady <- left_join(Grady, FF_Chem_Full, by = c("API"="APINumber"), copy=FALSE)
+
+
+## Eliminate Blank values and fields that do not add value.
+
+
+Clean_Grady <- Grady
+Clean_Grady$'First Month Gas'[is.na(Grady$'First Month Gas')] <- 0
+Clean_Grady$'First Month Oil'[is.na(Grady$'First Month Oil')] <- 0
+Clean_Grady$'First Month BOE' <- Grady$'First Month Gas'/6 + Grady$'First Month Oil'
+Clean_Grady$'First Month BOE' <- round(Clean_Grady$'First Month BOE') 
+
+Clean_Grady <- Clean_Grady %>% select (-c("API", "Well Name", "Producing Status", "Drill Type", "Spud Date", "ChokeSize", "Legal", "Formations", "First Month Oil", "First Month Gas", "First 60 Gas", "First 60 Oil", "First 60 BOE")) #consider using Formations or Reservoirs
+
+
+#rename output aka 'First Month BOE'
+colnames(Clean_Grady) <- c("Operator", "Reservoir", "Prod_Type", "MD", "Completed_Interval", "Fracture_Treatment", "Pumping_Flowing", "Lateral_Length", "TVD", "Frac_Fluid_W", "F_m_BOE")
+
+
+
+## Data Exploration
+
+
+
+summary(Clean_Grady$MD)
+str(Clean_Grady$MD)
+
+
+hist(Clean_Grady$ MD, main= "Measured Depth Frequency", xlab = "Measured Depth (ft)")
+hist(Clean_Grady$Lateral_Length, main= "Lateral Length of Horizontal Wells (ft)", xlab = "Lateral Length (ft)")
+
+ggplot(Clean_Grady, aes(x=F_m_BOE))+ geom_histogram() + ggtitle("Initial Production Barrells of Oil Equivalent(BOE)") + xlab("Inital BOE Production")
+
+ggplot(Clean_Grady, aes(x= Lateral_Length, y=F_m_BOE)) + geom_point() + ggtitle("Initial Production vs. Lateral Length") +xlab("Lateral Length") +ylab("Initial Production (1 month)")
+
+
+ggplot(Clean_Grady, aes(x= Lateral_Length, y=F_m_BOE)) + geom_point() + ggtitle("Initial Production vs. Lateral Length") +xlab("Lateral Length") +ylab("Initial Production (1 month)")
+
+
+
+
+## Discretize Data 
+#BOE above 70,000 was excluded so that bins could be more uniform. In looking at the above Initial production vs. Lateral Length chart, it can be seen visually the great disparity between those outliers.
+
+Clean_Grady <- subset(Clean_Grady, F_m_BOE < 70000)
+
+Clean_Grady <- Clean_Grady %>%
+select(-c(Fracture_Treatment)) %>% #Exclude Fracture Treatment
+drop_na() %>%
+mutate_at(vars("Lateral_Length"), funs(as.numeric)) %>%
+mutate_if(is.character, funs(as.factor)) %>% # convert categorical variables to factor
+mutate_at(vars("F_m_BOE"), funs(discretize(.,breaks=5, main= "Equal Frequency"))) %>% #discretize numeric variables
+mutate_if(is.character, funs(as.factor)) %>% # convert categorical variables to factor
+drop_na() 
+
+
+
+#Rename Production Data Levels
+
+
+#Trickle	      Low	          Medium	          High	         Super Max
+#2 - 1,350;	1,350 - 4,670;	4,670 - 10,000;	10,000 - 18,100;	18,100 - 69,400
+
+
+
+write.csv(Clean_Grady, "Clean_Grady.csv")
+Clean_Grady_Temp <- Clean_Grady 
+Clean_Grady <- read_csv("Clean_Grady_2.csv")
+
+
+Clean_Grady$F_m_BOE <- Clean_Grady_Temp$F_m_BOE
+Clean_Grady <- Clean_Grady %>% 
+select(-c(Proppant, Fracture_Treatment)) %>%
+mutate_if(is.character, funs(as.factor)) %>% # convert categorical variables to factor
+drop_na()
+
+
+
+levels(Clean_Grady$F_m_BOE) <-c("Trickle", "Low", "Medium", "High", "Super_Max")
+
+summary(Clean_Grady$F_m_BOE)
+
+
+
+
+
+
+
+
+
+## Split Train and Test Data
+
+set.seed(25)
+Train_Grady <- Clean_Grady %>% sample_frac(size = 0.8)
+Test_Grady <- Clean_Grady %>% anti_join(Train_Grady)
+str(Train_Grady$F_m_BOE)
+str(Test_Grady$F_m_BOE)
+
+
+## Pre-Process Data
+#nzv caused the accuracy to decrease 
+
+# utilize range methods in caret to remove and normalize variables
+
+PreProc <- preProcess(Train_Grady, method = c("scale"))
+
+Train_new <- predict(PreProc, Train_Grady)
+Test_new <- predict(PreProc, Test_Grady)
+
+
+
+# Data
+
+
+## Data Used for Predictions
+
+head(Clean_Grady)
+
+
+
+# Prediction Results
+
+## SVM
+#Polynomial decreased in the prediction capabilities. It could only reach about 22%. Using scale in pre-processing didn't effect the results.
+
+### Linear 
+#Linear kernel with only disc of M_f_BOE 33.07% accuracy. This is an increase from 28.8 after cleaning up the data.
+#c= 10 g = 0.001
+#c=15 g =0.001
+
+#28.93% w/ proppant. Therefore I have excluded Proppant from my calculations. 
+#31.50%
+
+############################################################################################
+#############################################################################################
+#THis makes sense as the proppant is not all one size. It's a range of sizes and as such would have been important to include as a variable. The issue is my data sorce was extremely inconsistent in reporting the proppant size. Additionally some had to be excluded as they were clearly wrong. This being a field in which the operator could respond in a text format, there are many more opportunities for error.  
+
+tune_out <- tune.svm(F_m_BOE~., data = Train_new,
+type = "C-classification",
+kernel = "linear",
+cost = c(1, 5, 10), 
+gamma = c(0.001, .005)) 
+
+# print out the best tuned parameters
+tune_out$best.parameters$cost
+tune_out$best.parameters$gamma
+
+# build the optimal model
+svm_optimal <- svm(F_m_BOE ~., data = Train_new,
+type = "C-classification",
+kernel = "linear",
+cost = tune_out$best.parameters$cost,
+gamma = tune_out$best.parameters$gamma)
+
+svm_optimal_pred <- predict(svm_optimal, Test_new)
+
+# confusion matrix
+caret::confusionMatrix(data = svm_optimal_pred, 
+reference = Test_new$F_m_BOE)
+
+
+### Radial 
+#Radial kernel with disc of only M_f_BOE 34.65% accuracy 
+
+#Radial kernel; 38.58%, c =20, g =0.1
+
+# use linear kernel
+svm_radial <- svm(F_m_BOE ~., data = Train_new, type = "C-classification", kernel = "radial", cost =20, gamma= 0.1)
+
+svm_radial
+
+svm_radial_pred <- predict(svm_radial, Test_new)
+
+
+str(Test_new)
+# confusion matrix
+caret::confusionMatrix(data = svm_radial_pred, 
+reference = Test_new$F_m_BOE)
+
+
+
+## Tunning
+#During the tunning phase, the tune.svm believed the optimum cost = 20 and gamma = 0.01. This however is not as accurate as then using C=30 and g = 0.1.
+#Tune results for radial: 31.50%, c = 20, g = 0.01
+
+tune_out <- tune.svm(F_m_BOE~., data = Train_new,
+type = "C-classification",
+kernel = "radial",
+# modify the width of the decision boundary. 
+# high cost -> overfit training data. low cost -> miss subtle but important pattern
+cost = c(1,10,20), 
+# gamma specifies how far a single training point reach, controls the kernel width
+# small value -> larger similarity radius (points farther apart are considered similar). smoother decision boundary
+# large value -> smaller similarity radius, more complex and contrained. less smooth boundary
+gamma = c(.001, .01, .5)) 
+
+# print out the best tuned parameters
+tune_out$best.parameters$cost
+tune_out$best.parameters$gamma
+
+# build the optimal model
+svm_optimal <- svm(F_m_BOE ~., data = Train_new,
+type = "C-classification",
+kernel = "radial",
+cost = tune_out$best.parameters$cost,
+gamma = tune_out$best.parameters$gamma)
+
+svm_optimal_pred <- predict(svm_optimal, Test_new)
+
+# confusion matrix
+caret::confusionMatrix(data = svm_optimal_pred, 
+reference = Test_new$F_m_BOE)
+
+
+
+# Random Forest
+
+#model 1 (not shown in report)
+#30.4%
+
+
+
+set.seed(25)
+rf.model <- randomForest(F_m_BOE ~ ., data = Train_new , ntree = 500, nodesize =20)
+rf.predict <- predict(rf.model, Test_new)
+print(rf.cm <- confusionMatrix(rf.predict, Test_new$F_m_BOE))
+
+
+
+#RF 2- Shown in report. Accuracy 37.6%
+
+
+set.seed(25)
+rf.model <- randomForest(F_m_BOE ~ ., data = Train_new , ntree = 200, nodesize =5)
+rf.predict <- predict(rf.model, Test_new)
+print(rf.cm <- confusionMatrix(rf.predict, Test_new$F_m_BOE))
+
+
+
+
+
+# K-Nearest Neighbor
+
+#25.6% accuracy
+
+
+# Remove character data as it has no levels 
+Wet_set <- Train_new %>% 
+select (-c("Operator", "Reservoir", "Prod_Type", "Pumping_Flowing"))     
+
+#Exclude character data 
+Dry_set_Val <- Test_new %>% 
+select (-c("Operator", "Reservoir", "Prod_Type", "Pumping_Flowing")) 
+
+
+
+label <- Wet_set$F_m_BOE  # label is a dependent variable 
+Wet_set <- Wet_set[,-6] # only predictor variables from train_set
+
+#Take out F_m_BOE
+Dry_set <- Dry_set_Val[,-6]
+# knn model
+# train - matrix or data frame of training samples
+# test - matrix or data frame of test samples
+# cl - factor of true classifications of training set
+# k - number of neighbours considered
+knn_impute <- knn(train = Wet_set, test = Dry_set, cl = label, k = 20)
+
+
+# Show prediction result
+caret::confusionMatrix(data = knn_impute, reference = Dry_set_Val$F_m_BOE)
+
+
+
+## Naive Bayes Model
+
+#28.00%
+#The Naive Bayes model has low accuracy, about 12% less than the top recorder. The biggest concern with this nubmer is the (0%) sensitiviy for the low class and 19% for the high and medium F_m_BOE. 
+
+# fit a Naive Bayes model using the e1071 package
+library(e1071)
+set.seed(25)
+
+nb <- naiveBayes(F_m_BOE~., 
+data = Train_new)
+
+pred_nb=predict(nb, 
+newdata=Test_new, 
+type=c("class"))
+
+# confusion matrix
+caret::confusionMatrix(data = pred_nb, 
+reference = Test_new$F_m_BOE)
+
+
+
+
+## Boosted Tree model
+
+# fit a boosted model
+set.seed(25)
+
+# use 10-fold cross validation
+train_control <- trainControl(method = "cv",
+number = 15)
+
+
+gbm_model <- train(F_m_BOE~.,
+data = Train_new,
+method = "gbm",
+trControl = train_control)
+
+
+# plot variable important
+plot(varImp(gbm_model))
+
+# make prediction on the test set
+gbm_model_prediction <- predict(gbm_model, 
+newdata = Test_new[,-10],
+type="raw")
+
+# confusion matrix
+caret::confusionMatrix(data = gbm_model_prediction, 
+reference = Test_new$F_m_BOE)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Areas which did not work
+
+
+## Modeling using RPart Pre-Pruning
+
+#My models are running but by trees are too complex to be created it seems. For this reason I've excluded the tree's graphic. In an attempt to reduce the size, I've excluded some of the less significant attributes from my train and test models such as "MD", "TVD", and "Lateral_Length". Still no help there. 
+
+
+
+#Train_Grady_Prune <- Train_Grady %>% select(c("Operator", "Reservoir", "Prod_Type", "Completed_Interval", "Pumping_Flowing", "Frac_Fluid_W", "F_m_BOE"))
+#Test_Grady_Prune <- Test_Grady %>% select(c("Operator", "Reservoir", "Prod_Type", "Completed_Interval", "Pumping_Flowing", "Frac_Fluid_W", "F_m_BOE"))
+
+#rebuild prepruned tree
+# Grady_Rpart <- rpart(Operator~.,
+#               data=Train_Grady_Prune,
+#               method= "class")
+
+# plot the tree
+# rpart.plot(Grady_Rpart, box.palette="RdBu", shadow.col="gray", nn=TRUE)
+
+
+
+## Prediction using RPart
+
+
+# make prediction
+### rpart_prediction <- predict(Grady_Rpart, newdata = Test_Grady %>% select(-F_m_BOE),
+###                            type="class")
+
+
+### caret::confusionMatrix(data = rpart_prediction,
+###                       reference = Test_Grady$F_m_BOE)
+
+
+
+
+
+#I tried making Kmeans and decision trees, however recieved errors relating to the nature of my data being too large on account that it's in continous variables. They're not true factors and therefore not suitable for these types of analysis. 
+
+
+
+## Predictions which didn't work 
+
+## Extracting Proppant Data
+#Fracture Treatment has many treatments listed in a string. Proppant has many brands as well, but a commonality is the use of "POUNDS" following the value of proppant. In the Oil and Gas industry, MM reffers to 1000*1000 and M to 1000. So for example 2.3 MM POUNDS OF proppant is 2,300,000
+
+
+Clean_Grady <- Clean_Grady %>%
+  mutate_at(vars("Proppant"), funs(as.numeric)) %>%
+  select(-c(Fracture_Treatment, Proppant,X1)) %>% #Exclude Proppant and Fracture Treatment
+  mutate_if(is.character, funs(as.factor)) %>%
+  drop_na()
+
