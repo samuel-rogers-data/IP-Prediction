@@ -1,0 +1,6 @@
+The Initial Production (IP) Prediction project's purpose is to predict the first month of oil from a well without producing from the well. Utilizing numerous databases, the data is manipulated via R in R Studio utilizing well attributes to form a prediction and provide a quantifiable accuracy to the first show of oil, prior to the production phase. While a traditional system relies on neighboring wells, this project could potentially provide accurate results to a well which has no neighboring wells to reference.
+
+Folder contains R and R studio.
+
+- Created by Samuel Rogers 
+IST 707
